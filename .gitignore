@@ -1,0 +1,10 @@
+.env
+.env.local
+**/tapo_cache.json
+**/fb_cookies.json
+**/venv/
+__pycache__/
+*.pyc
+**/kasa_cache.json
+
+**/.venv/

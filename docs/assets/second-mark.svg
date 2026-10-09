@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Second mark</title>
+  <desc id="desc">A luminous number two in a dark rounded square.</desc>
+  <rect width="128" height="128" rx="28" fill="#0b1220"/>
+  <path d="M36 53c0-17 12-27 29-27 17 0 29 10 29 26 0 12-8 20-22 30l-9 6h31v11H36V89l29-21c12-8 17-12 17-17 0-9-7-14-17-14-10 0-17 6-17 16z" fill="#59e0df"/>
+  <circle cx="96" cy="30" r="6" fill="#a78bfa"/>
+</svg>
