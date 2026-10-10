@@ -5,6 +5,7 @@ requires a live, unique Tapo nickname; the bot never accepts room-to-IP mappings
 """
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -48,6 +49,30 @@ def load_tapo():
     return None
 
 
+def approved_devices():
+    """Require an explicit alias-to-app-confirmed-MAC binding for each device."""
+    raw = os.environ.get("TAPO_APPROVED_DEVICES", "")
+    if not raw:
+        return {}
+    devices = json.loads(raw)
+    if not isinstance(devices, dict):
+        raise ValueError("TAPO_APPROVED_DEVICES must be a JSON object.")
+    result = {}
+    for alias, identity in devices.items():
+        if not isinstance(alias, str) or not alias.strip() or not isinstance(identity, dict):
+            raise ValueError("Each approved device needs an alias and identity object.")
+        mac = identity.get("mac")
+        if not isinstance(mac, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}|[0-9a-fA-F]{12}", mac):
+            raise ValueError("Each approved device needs an app-confirmed MAC.")
+        if identity.get("model") is not None and not isinstance(identity["model"], str):
+            raise ValueError("Approved device model must be a string.")
+        key = alias.strip().casefold()
+        if key in result:
+            raise ValueError("Approved aliases must be unique ignoring case.")
+        result[key] = {"mac": mac, "model": identity.get("model")}
+    return result
+
+
 def parse_command(text):
     text = text.strip()
     strict = STRICT_COMMAND.fullmatch(text)
@@ -65,6 +90,10 @@ def create_handler(client, tapo_module):
     thread = default_thread()
     tapo_user = os.environ.get("TAPO_USERNAME")
     tapo_password = os.environ.get("TAPO_PASSWORD")
+    devices = approved_devices()
+    actions = {item.strip().lower() for item in os.environ.get("TAPO_APPROVED_ACTIONS", "").split(",") if item.strip()}
+    if not actions.issubset({"status", "on", "off", "toggle"}):
+        raise ValueError("TAPO_APPROVED_ACTIONS contains an unsupported action.")
 
     async def on_message(message):
         if str(message.sender_id) == str(client.uid):
@@ -89,43 +118,38 @@ def create_handler(client, tapo_module):
             await reply("Tapo integration is not configured.")
             return
         if command == "list":
-            try:
-                devices = await tapo_module.discover_all_devices(tapo_user, tapo_password, silent=True)
-                if not devices:
-                    await reply("No Tapo devices found.")
-                    return
-                rows = [
-                    f"{device['alias']} ({device['model']}): {'ON' if device['is_on'] else 'OFF'}"
-                    for device in devices
-                ]
-                await reply("Discovered Tapo devices:\n" + "\n".join(rows))
-            except Exception as exc:
-                print(f"Tapo discovery failed ({type(exc).__name__}).", file=sys.stderr)
-                await reply("Tapo discovery failed.")
+            await reply("Approved nicknames: " + (", ".join(sorted(devices)) if devices else "none"))
             return
 
         if not alias:
             await reply(f"Specify the exact Tapo nickname: !{command} <nickname>")
             return
+        identity = devices.get(alias.casefold())
+        if identity is None or command not in actions:
+            await reply("Device or action is not approved for this bridge.")
+            return
         try:
-            device, _ip = await tapo_module.get_device_by_alias(alias, tapo_user, tapo_password)
-            info = (await device.get_device_info()).to_dict()
-            live_name = str(info.get("nickname") or alias)
-            state = bool(info.get("device_on", False))
-            if command == "on":
-                await device.on()
-                await reply(f"Turned ON '{live_name}'.")
-            elif command == "off":
-                await device.off()
-                await reply(f"Turned OFF '{live_name}'.")
-            elif command == "toggle":
-                if state:
-                    await device.off()
-                else:
-                    await device.on()
-                await reply(f"Toggled '{live_name}' {'OFF' if state else 'ON'}.")
-            elif command == "status":
+            device, session = await tapo_module.get_device_by_alias(
+                alias, tapo_user, tapo_password,
+                expected_mac=identity["mac"], expected_model=identity["model"],
+            )
+            try:
+                live_name = tapo_module.verify_live_device(device, alias, identity["mac"], identity["model"])
+                state = bool(device.is_on)
+                if command != "status":
+                    target_on = command == "on" or (command == "toggle" and not state)
+                    if target_on:
+                        await device.turn_on()
+                    else:
+                        await device.turn_off()
+                    await device.update()
+                    tapo_module.verify_live_device(device, alias, identity["mac"], identity["model"])
+                    if bool(device.is_on) != target_on:
+                        raise ConnectionError("State readback did not confirm the action.")
+                    state = target_on
                 await reply(f"'{live_name}' is {'ON' if state else 'OFF'}.")
+            finally:
+                await tapo_module.close_device_and_session(device, session)
         except Exception as exc:
             # Do not echo raw chat text, local IPs, credentials, or library errors.
             print(f"Tapo command failed ({type(exc).__name__}).", file=sys.stderr)
